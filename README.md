@@ -36,11 +36,11 @@ The game state is encoded dynamically from the perspective of each planet using 
 The state size is 15000 bits:
 - **My Ships (1000 bits):** Encoded using an overlapping `ScalarEncoder`. Similar ship counts share active bits.
 - **Union of Geospatial SDRs (2000 bits each):** For Enemy Planets, Neutral Planets, Friendly Planets.
-- **Union of Geospatial SDRs (4000 bits each):** For Enemy Fleets and Friendly Fleets. Fleets use a richer representation encoding 1000 bits for Angle and 3000 bits for Spatial/Distance logic directly coupled prior to union to prevent binding collisions.
+- **Union of Geospatial SDRs (4000 bits each):** For Enemy Fleets and Friendly Fleets. Fleets use a richer representation encoding 1000 bits for Position Angle, 1000 bits for Distance, 1000 bits for Phase-Shifted Position Angle, and 1000 bits directly mapped to the flight heading `fleet.angle`. This explicitly bounds flight trajectory to spatial location prior to union to solve the binding problem and enable the network to learn to ignore fleeing armadas.
 - A `GeospatialEncoder` translates distance and angle of an entity relative to the planet into a sparse representation. By applying a **bitwise OR (Union)** across all entities of a given type, the agent handles a variable number of planets/fleets seamlessly without sorting or changing the input array size.
 
 ### 2. Spatial Pooler
-The binary observation is fed through a **Spatial Pooler** that produces an SDR — a small set of active columns from a 2048-column pool. This provides noise robustness and semantic similarity.
+The binary observation is fed through a **Spatial Pooler** that produces an SDR — a small set of active columns from a 512-column pool. This provides noise robustness and semantic similarity.
 
 ### 3. Temporal Memory (per-planet timelines)
 Each planet maintains its **own temporal context** (`tm_states` dictionary). The Temporal Memory module learns sequential patterns by maintaining predictive cell states, enabling the agent to anticipate future game states.
@@ -112,9 +112,9 @@ Key constants in `htmrl_agent.py`:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `INPUT_SIZE` | 1100 | Observation encoding size |
-| `cell_count` | 2048 | Spatial Pooler columns |
-| `active_count` | 40 | Active columns per SDR |
+| `INPUT_SIZE` | 15000 | Observation encoding size |
+| `cell_count` | 512 | Spatial Pooler columns |
+| `active_count` | 12 | Active columns per SDR |
 
 ---
 

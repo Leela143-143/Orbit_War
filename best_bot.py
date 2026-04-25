@@ -19,7 +19,7 @@ class log:
 # === SPATIAL POOLER CORE ===
 class SpatialPooler:
     def __init__(self, input_size, acts_n, boost_strength=1.0, reward_scaled_reinf=True, boost_scaled_reinf=False,
-                 only_reinforce_selected=True, normalize_rewards=True, cell_count=2048, active_count=40, boost_until=0,
+                 only_reinforce_selected=True, normalize_rewards=True, cell_count=512, active_count=12, boost_until=0,
                  reward_window=1000):
         self.input_size = input_size
         self.input_size_flat = np.prod(input_size)
@@ -210,9 +210,6 @@ class CyclicEncoder:
         return state
 
 class TileGeospatialEncoder:
-    """
-    Splits the encoding space into distinct blocks (e.g. Angle and Distance).
-    """
     def __init__(self, size=2000, active_bits=50, is_fleet=False):
         self.size = size
         self.active_bits = active_bits
@@ -220,16 +217,20 @@ class TileGeospatialEncoder:
 
         if self.is_fleet:
             # Fleet: 4000 bits total, 100 active
-            # 1. Angle (1000 bits)
-            # 2. Distance (3000 bits)
+            # 1. Positional Angle (1000 bits)
+            # 2. Distance (1000 bits)
+            # 3. Positional Angle Phase-Shifted (1000 bits)
+            # 4. Flight Heading / Trajectory (1000 bits)
             self.angle_encoder = CyclicEncoder(1000, 25, 0, 2*math.pi)
-            self.dist_encoder = ScalarEncoder(3000, 75, 0, 150)
+            self.dist_encoder = ScalarEncoder(1000, 25, 0, 150)
+            self.angle_encoder_phase = CyclicEncoder(1000, 25, 0, 2*math.pi)
+            self.heading_encoder = CyclicEncoder(1000, 25, 0, 2*math.pi)
         else:
             # Planet: 2000 bits total, 50 active
             self.angle_encoder = CyclicEncoder(1000, 25, 0, 2*math.pi)
             self.dist_encoder = ScalarEncoder(1000, 25, 0, 150)
 
-    def encode(self, dx, dy):
+    def encode(self, dx, dy, heading=None):
         dist = math.sqrt(dx**2 + dy**2)
         angle = math.atan2(dy, dx)
         if angle < 0:
@@ -238,28 +239,34 @@ class TileGeospatialEncoder:
         angle_sdr = self.angle_encoder.encode(angle)
         dist_sdr = self.dist_encoder.encode(dist)
 
-        return np.concatenate((angle_sdr, dist_sdr))
+        if self.is_fleet:
+            angle_shifted = (angle + math.pi) % (2*math.pi)
+            angle_phase_sdr = self.angle_encoder_phase.encode(angle_shifted)
+
+            # Use provided heading, or default to 0 if none provided
+            h = heading if heading is not None else 0.0
+            heading_sdr = self.heading_encoder.encode(h)
+
+            return np.concatenate((angle_sdr, dist_sdr, angle_phase_sdr, heading_sdr))
+        else:
+            return np.concatenate((angle_sdr, dist_sdr))
 
     def encode_union_topk(self, origin_x, origin_y, targets):
-        """
-        targets is a list of objects with x and y attributes.
-        Returns a single unioned SDR with exactly `self.active_bits` active
-        using Proximity-Weighted Density Summation.
-        """
         float_state = np.zeros(self.size, dtype=np.float32)
 
         for target in targets:
             dx = target.x - origin_x
             dy = target.y - origin_y
 
-            # Distance weight: closer entities have higher priority
+            # Check if target has an angle (flight heading)
+            heading = getattr(target, 'angle', None)
+
             dist = math.sqrt(dx**2 + dy**2)
             weight = 1.0 / (1.0 + dist)
 
-            sdr = self.encode(dx, dy)
+            sdr = self.encode(dx, dy, heading)
             float_state[sdr] += weight
 
-        # Top-K Sparsified Union
         final_state = np.zeros(self.size, dtype=bool)
         if len(targets) > 0:
             non_zero_count = np.count_nonzero(float_state)
@@ -409,8 +416,8 @@ class HTMRLAgent:
             self.sp = SpatialPooler(
                 input_size=(INPUT_SIZE,), 
                 acts_n=1,
-                cell_count=2048,
-                active_count=40
+                cell_count=512,
+                active_count=12
             )
 
     def get_moves(self, obs, learn=False, reward=0):
