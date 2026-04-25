@@ -19,7 +19,7 @@ perm_dec_predict_step = 0.000#5
 max_segments_per_cell = 4
 max_synapses_per_segment = 32
 
-sp_size = (512,)
+sp_size = (2048,)
 sp_size_flat = np.prod(sp_size)
 
 tm_size = (sp_size_flat, cells_per_col)

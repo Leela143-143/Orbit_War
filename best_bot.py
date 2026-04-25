@@ -19,7 +19,7 @@ class log:
 # === SPATIAL POOLER CORE ===
 class SpatialPooler:
     def __init__(self, input_size, acts_n, boost_strength=1.0, reward_scaled_reinf=True, boost_scaled_reinf=False,
-                 only_reinforce_selected=True, normalize_rewards=True, cell_count=512, active_count=12, boost_until=0,
+                 only_reinforce_selected=True, normalize_rewards=True, cell_count=2048, active_count=41, boost_until=0,
                  reward_window=1000):
         self.input_size = input_size
         self.input_size_flat = np.prod(input_size)
@@ -334,38 +334,11 @@ class ReverseCyclicDecoder:
         val = self.min_val + (mean_angle / (2 * math.pi)) * self.range
         return val
 
-def action_decode(encoding_indices, sp_size, num_cells=None):
-    """
-    Takes the active indices from HTM output (which could be the Temporal Memory indices,
-    which have length sp_size * cells_per_col, or Spatial Pooler indices).
-
-    If indices are from TM, we map them back to SP columns first.
-    Then we split the SP columns into an angle portion and a ship portion.
-    """
-    if num_cells is not None:
-        # Map TM cells back to SP columns
-        # tm_size = sp_size * cells_per_col
-        # column_idx = cell_idx // cells_per_col
-        columns = indices_to_columns(encoding_indices, num_cells)
-    else:
-        columns = np.array(encoding_indices)
-
-    # Assuming SP output size is e.g. 200 bits total for action
-    # First half = Angle, Second half = Ships %
-    half_size = sp_size // 2
-
-    angle_cols = columns[columns < half_size]
-    ship_cols = columns[columns >= half_size] - half_size
-
-    # We decode Angle to 0 -> 2pi
-    angle_decoder = ReverseCyclicDecoder(half_size, 0, 2*math.pi)
-    angle = angle_decoder.decode(angle_cols)
-
-    # We decode Ship % to 0 -> 100% (or fraction 0 -> 1)
-    ship_decoder = ReverseScalarDecoder(half_size, 0.0, 1.0)
-    ship_pct = ship_decoder.decode(ship_cols)
-
-    return angle, ship_pct
+def encoding_to_action(encoding, actions, sp_size):
+    buckets = np.floor(encoding / (float(sp_size) / actions))
+    buckets = buckets.astype(np.int32)
+    counts = np.bincount(buckets, minlength=actions)
+    return counts.argmax()
 
 def indices_to_columns(tm_indices, cells_per_col):
     cols = np.array(tm_indices) // cells_per_col
@@ -415,9 +388,9 @@ class HTMRLAgent:
         else:
             self.sp = SpatialPooler(
                 input_size=(INPUT_SIZE,), 
-                acts_n=1,
-                cell_count=512,
-                active_count=12
+                acts_n=25,
+                cell_count=2048,
+                active_count=41
             )
 
     def get_moves(self, obs, learn=False, reward=0):
@@ -435,16 +408,21 @@ class HTMRLAgent:
         for mine in my_planets:
             state = self.encoder.encode(mine, planets, fleets, player)
             encoding = self.sp.step(state, learn=False)
-            
-            angle, ship_pct = action_decode(encoding, self.sp.size, num_cells=None)
 
-            if ship_pct < 0.1 or mine.ships == 0:
+            # Reverting back to original 25 categorical actions correctly mapped from SP column chunks
+            action = encoding_to_action(encoding, 25, self.sp.size)
+
+            if action == 0:
                 continue
                 
-            ships = int(mine.ships * ship_pct)
-            if ships == 0:
-                continue
+            if action <= 12:
+                ships = max(1, int(mine.ships * 0.5))
+                sector = action - 1
+            else:
+                ships = mine.ships
+                sector = action - 13
                 
+            angle = (sector * (2 * math.pi / 12))
             moves.append([mine.id, angle, ships])
                 
         return moves
