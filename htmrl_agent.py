@@ -8,7 +8,12 @@ import HTMRL.spatial_pooler as spatial_pooler
 import HTMRL.temporal_memory as temporal_memory
 
 from HTMRL.encoders import ScalarEncoder, CyclicEncoder, TileGeospatialEncoder
-from HTMRL.decoders import action_decode
+def encoding_to_action(encoding, actions, sp_size):
+    buckets = np.floor(encoding / (float(sp_size) / actions))
+    buckets = buckets.astype(np.int32)
+    counts = np.bincount(buckets, minlength=actions)
+    return counts.argmax()
+
 
 # 2.5% Sparsity rule
 # My Ships: Size 1000, Active 25
@@ -72,12 +77,12 @@ class HTMRLAgent:
         else:
             self.sp = spatial_pooler.SpatialPooler(
                 input_size=(INPUT_SIZE,), 
-                acts_n=1,
-                cell_count=512,
-                active_count=12
+                acts_n=25,
+                cell_count=2048,
+                active_count=41
             )
             self.tm = temporal_memory.TemporalMemory()
-        self.tm_size = 512 * 32
+        self.tm_size = 2048 * 32
         self.tm_states = {}
         self.last_actions = {}
         self.last_states = {}
@@ -130,15 +135,15 @@ class HTMRLAgent:
             if mine.id not in self.tm_states:
                 from scipy.sparse import csr_matrix
                 self.tm_states[mine.id] = {
-                    "actives": csr_matrix((1, 512 * 32), dtype=bool),
-                    "winners": csr_matrix((1, 512 * 32), dtype=bool),
-                    "active_segs": csr_matrix((512, 32 * 4), dtype=bool),
-                    "matching_segs": csr_matrix((512, 32 * 4), dtype=bool),
-                    "matches_per_col": np.zeros((512,)),
-                    "actives_per_col": np.zeros((512,)),
-                    "active_pot_counts": [0] * (512 * 32 * 4),
-                    "actives_old_t": csr_matrix((1, 512 * 32), dtype=bool).transpose().tocsr(),
-                    "actives_old_perms": [0.0] * (512 * 32),
+                    "actives": csr_matrix((1, 2048 * 32), dtype=bool),
+                    "winners": csr_matrix((1, 2048 * 32), dtype=bool),
+                    "active_segs": csr_matrix((2048, 32 * 4), dtype=bool),
+                    "matching_segs": csr_matrix((2048, 32 * 4), dtype=bool),
+                    "matches_per_col": np.zeros((2048,)),
+                    "actives_per_col": np.zeros((2048,)),
+                    "active_pot_counts": [0] * (2048 * 32 * 4),
+                    "actives_old_t": csr_matrix((1, 2048 * 32), dtype=bool).transpose().tocsr(),
+                    "actives_old_perms": [0.0] * (2048 * 32),
                     "permanence_updates_buffer": [[], [], []],
                     "active_updates_buffer": [[], []],
                     "winner_updates_buffer": [[], []]
@@ -158,23 +163,24 @@ class HTMRLAgent:
 
 
             if tm_actives.nnz > 0:
-                angle, ship_pct = action_decode(tm_actives.indices, self.sp.size, num_cells=32)
+                action = encoding_to_action(tm_actives.indices, 25, self.tm_size)
             else:
-                angle, ship_pct = action_decode(sp_active_cols, self.sp.size, num_cells=None)
+                action = encoding_to_action(sp_active_cols, 25, self.sp.size)
             
             self.last_states[mine.id] = state
-            # For learning we only pass action 0 since we have acts_n=1
-            self.last_actions[mine.id] = 0
+            self.last_actions[mine.id] = action
             
-            # ship_pct is continuous between 0 and 1
-            # If ship_pct < 0.1 or we have no ships, do nothing
-            if ship_pct < 0.1 or mine.ships == 0:
+            if action == 0:
                 continue
                 
-            ships = int(mine.ships * ship_pct)
-            if ships == 0:
-                continue
-            
+            if action <= 12:
+                ships = max(1, int(mine.ships * 0.5))
+                sector = action - 1
+            else:
+                ships = mine.ships
+                sector = action - 13
+
+            angle = (sector * (2 * math.pi / 12))
             moves.append([mine.id, angle, ships])
 
 
