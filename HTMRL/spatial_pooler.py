@@ -90,19 +90,15 @@ class SpatialPooler:
                                                         np.mean(vals[vals < self.connected_perm_thresh])))
         return vals
 
-    def _perms_to_activateds(self, inputs, perms):
-        connecteds = np.array((perms - self.connected_perm_thresh).clip(min=0), dtype=bool) * (
-            ~ np.isnan(self.permanences))
+    def _perms_to_activateds(self, perms_active):
+        with np.errstate(invalid='ignore'):
+            connecteds = perms_active > self.connected_perm_thresh
 
         # Count the number of connected active input cells for each column
-        conn_counts = np.dot(np.expand_dims(inputs, 0), np.array(connecteds, dtype=int))
-        conn_counts = np.squeeze(conn_counts)
+        conn_counts = connecteds.sum(axis=0)
         conn_counts = np.add(conn_counts, self._tie_breaker, casting='unsafe')
 
         # Get the top-k columns in terms of connected active input cells
-        # impl: argpartition calculates the indices that sort arg0 such that
-        # at least the first arg1 entries are the arg1 smallest values, in order.
-        # Makes no guarantees about the rest of the values (but we don't need those)
         activated = np.argpartition(- conn_counts, self.active_columns_count)[:self.active_columns_count, ]
         return activated
 
@@ -110,14 +106,11 @@ class SpatialPooler:
         """
         Gets the indices of the activated columns
         """
-        # Get all the active synapses.
-        # impl: (because bool(nan) == True, filter those out manually
+        active_perms = self.permanences[inputs]
         if self.boost_strength:
-            boost_perms = self.permanences * self.boost_factors
-        else:
-            boost_perms = self.permanences
+            active_perms = active_perms * self.boost_factors
 
-        activated = self._perms_to_activateds(inputs, boost_perms)
+        activated = self._perms_to_activateds(active_perms)
 
         return activated
 

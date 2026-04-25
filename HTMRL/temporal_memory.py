@@ -445,16 +445,10 @@ class TemporalMemory(object):
 
         self.actives_old_t = self.actives.transpose().tocsr()
 
-        dense_acts = self.actives.todense()  # Not too big, can densify safely
+        dense_acts = self.actives.toarray()[0]
 
-        # List of cells: active ones replaced by increase in permanence, inactives by decrease
-        self.actives_old_perms = \
-        dense_acts * perm_inc_step - np.invert(dense_acts) * perm_dec_step
-        t = time.time()
+        self.actives_old_perms = np.where(dense_acts, perm_inc_step, -perm_dec_step)
 
-        self.actives_old_perms = self.actives_old_perms.tolist()[0]
-        tt = time.time()
-        timera += tt - t
         #timerb += ttt - tt
         #self.active_pot_counts_old = self.active_pot_counts
         #self.active_pot_counts = csc_matrix((1, tm_size_flat[0] * max_segments_per_cell))
@@ -476,21 +470,20 @@ class TemporalMemory(object):
         """
         The full step: from SP active columns to TM active cells
         """
-        for col in range(sp_size_flat):
-            if col in activated_cols:
-                # For each active SP column, either...
-                if self.get_activated_segs_for_col_count(col) > 0:
-                    # ...activate the cell(s) predicted for that column
-                    self.activate_predicted_col(col)
-                else:
-                    # ...or burst all cells
-                    self.burst(col)
-
-
+        activated_set = set(activated_cols)
+        for col in activated_cols:
+            # For each active SP column, either...
+            if self.get_activated_segs_for_col_count(col) > 0:
+                # ...activate the cell(s) predicted for that column
+                self.activate_predicted_col(col)
             else:
-                # For each inactive SP column, punish anything that predicted it to be active
-                if self.get_matching_segs_for_col_count(col):
-                    self.punish_predicted(col)
+                # ...or burst all cells
+                self.burst(col)
+
+        matching_cols = np.nonzero(self.matches_per_col)[0]
+        for col in matching_cols:
+            if col not in activated_set:
+                self.punish_predicted(col)
 
         # The previous steps generated lists of updates to perform to the synapses and active/winner cells,
         # but they still have to be actually applied to the sparse matrices
