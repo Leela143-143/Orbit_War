@@ -1,6 +1,7 @@
 import os
 import base64
 import zlib
+import pickle
 
 def build_submission():
     pkl_file = "best_bot.pkl"
@@ -13,10 +14,35 @@ def build_submission():
         return
 
     with open(pkl_file, "rb") as f:
-        weights_data = f.read()
+        sp = pickle.load(f)
+
+    # --- Extreme Compression Routine for Kaggle 1MB Limit ---
+    import numpy as np
+    from scipy.sparse import csr_matrix
+
+    if hasattr(sp, 'permanences'):
+        # Zero out un-connected or NaN synapses since they don't fire
+        sp.permanences[sp.permanences < sp.connected_perm_thresh] = 0.0
+        sp.permanences[np.isnan(sp.permanences)] = 0.0
+
+        # Multiply by 100 and cast to uint8 to save massive space
+        sp.permanences = np.round(sp.permanences * 100).astype(np.uint8)
+
+        # Convert to CSR Sparse Matrix
+        sp.permanences = csr_matrix(sp.permanences)
+
+        # Drop training coefficients
+        sp.synapse_reinf_coeffs = np.zeros((1,1), dtype=bool)
+
+    # Pickle the optimized object into memory
+    import io
+    mem_file = io.BytesIO()
+    pickle.dump(sp, mem_file)
+    weights_data = mem_file.getvalue()
 
     # Compress the weights
     print("Compressing weights...")
+
     compressed_data = zlib.compress(weights_data)
     encoded_weights = base64.b64encode(compressed_data).decode('utf-8')
 
@@ -27,6 +53,7 @@ def build_submission():
     injection = f"""
 import io
 import zlib
+import pickle
 import sys
 import base64
 import HTMRL.temporal_memory as temporal_memory
@@ -46,26 +73,9 @@ WEIGHTS_B64 = '{encoded_weights}'
     bot_code = bot_code.replace("import os", "import os" + injection)
 
     # Decompress before unpickling
-    old_load_logic = """        if load_path and os.path.exists(load_path):
-            with open(load_path, "rb") as f:
-                data = pickle.load(f)
-                if isinstance(data, dict) and "sp" in data:
-                    self.sp = data["sp"]
-                    self.tms = data.get("tms", {})
-                else:
-                    self.sp = data
-                    self.tms = {}"""
+    old_load_logic = """        if load_path and os.path.exists(load_path):\n            with open(load_path, "rb") as f:\n                self.sp = pickle.load(f)"""
                 
-    new_load_logic = """        if WEIGHTS_B64:
-            # Decompress and then unpickle using the custom unpickler
-            decompressed = zlib.decompress(base64.b64decode(WEIGHTS_B64))
-            data = CustomUnpickler(io.BytesIO(decompressed)).load()
-            if isinstance(data, dict) and "sp" in data:
-                self.sp = data["sp"]
-                self.tms = data.get("tms", {})
-            else:
-                self.sp = data
-                self.tms = {}"""
+    new_load_logic = """        if WEIGHTS_B64:\n            # Decompress and then unpickle using the custom unpickler\n            decompressed = zlib.decompress(base64.b64decode(WEIGHTS_B64))\n            self.sp = CustomUnpickler(io.BytesIO(decompressed)).load()\n            import numpy as np\n            from scipy.sparse import csr_matrix\n            if hasattr(self.sp, 'permanences') and isinstance(self.sp.permanences, csr_matrix):\n                dense_perms = self.sp.permanences.toarray().astype(float) / 100.0\n                dense_perms[dense_perms == 0.0] = np.nan\n                self.sp.permanences = dense_perms"""
 
     bot_code = bot_code.replace(old_load_logic, new_load_logic)
     
