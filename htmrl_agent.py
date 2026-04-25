@@ -73,11 +73,11 @@ class HTMRLAgent:
             self.sp = spatial_pooler.SpatialPooler(
                 input_size=(INPUT_SIZE,), 
                 acts_n=1,
-                cell_count=2048,
-                active_count=40
+                cell_count=512,
+                active_count=12
             )
             self.tm = temporal_memory.TemporalMemory()
-        self.tm_size = 2048 * 32
+        self.tm_size = 512 * 32
         self.tm_states = {}
         self.last_actions = {}
         self.last_states = {}
@@ -130,15 +130,15 @@ class HTMRLAgent:
             if mine.id not in self.tm_states:
                 from scipy.sparse import csr_matrix
                 self.tm_states[mine.id] = {
-                    "actives": csr_matrix((1, 2048 * 32), dtype=bool),
-                    "winners": csr_matrix((1, 2048 * 32), dtype=bool),
-                    "active_segs": csr_matrix((2048, 32 * 4), dtype=bool),
-                    "matching_segs": csr_matrix((2048, 32 * 4), dtype=bool),
-                    "matches_per_col": np.zeros((2048,)),
-                    "actives_per_col": np.zeros((2048,)),
-                    "active_pot_counts": [0] * (2048 * 32 * 4),
-                    "actives_old_t": csr_matrix((1, 2048 * 32), dtype=bool).transpose().tocsr(),
-                    "actives_old_perms": [0.0] * (2048 * 32),
+                    "actives": csr_matrix((1, 512 * 32), dtype=bool),
+                    "winners": csr_matrix((1, 512 * 32), dtype=bool),
+                    "active_segs": csr_matrix((512, 32 * 4), dtype=bool),
+                    "matching_segs": csr_matrix((512, 32 * 4), dtype=bool),
+                    "matches_per_col": np.zeros((512,)),
+                    "actives_per_col": np.zeros((512,)),
+                    "active_pot_counts": [0] * (512 * 32 * 4),
+                    "actives_old_t": csr_matrix((1, 512 * 32), dtype=bool).transpose().tocsr(),
+                    "actives_old_perms": [0.0] * (512 * 32),
                     "permanence_updates_buffer": [[], [], []],
                     "active_updates_buffer": [[], []],
                     "winner_updates_buffer": [[], []]
