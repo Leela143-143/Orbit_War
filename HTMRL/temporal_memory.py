@@ -200,11 +200,11 @@ class TemporalMemory(object):
         Burst all cells in an unpredicted column.
         """
         # Activate all cells in the col
-        _from = to_flat_tm(col, 0)
-        _to = to_flat_tm(col + 1, 0)
+        _from = col * cells_per_col
+        _to = _from + cells_per_col
         # Actually apply these later on, for efficiency
-        self.active_updates_buffer[0].extend(cells_per_col * [True])
-        self.active_updates_buffer[1].extend(list(range(_from, _to)))
+        self.active_updates_buffer[0].extend([True] * cells_per_col)
+        self.active_updates_buffer[1].extend(range(_from, _to))
         is_new_seg = False
 
         # Micro-optimization: cache the call result
@@ -418,8 +418,8 @@ class TemporalMemory(object):
         Grouped into one addition for efficiency
         """
         if len(self.permanence_updates_buffer[0]):
-            # Use actual sum_duplicates on COO instead of naive addition
-            # This is significantly faster for overlapping modifications
+            # COO is fast enough in C-level here, but to avoid .tocsr() which sorts indices
+            # we do sum_duplicates and add to seg_matrix
             modder = coo_matrix((self.permanence_updates_buffer[0],
                                  (self.permanence_updates_buffer[1], self.permanence_updates_buffer[2])),
                                 shape=self.seg_matrix.shape)
@@ -433,23 +433,17 @@ class TemporalMemory(object):
         Grouped into one addition each for efficiency
         """
         if len(self.active_updates_buffer[0]):
-            # Directly construct CSR since row is always 0
-            n_items = len(self.active_updates_buffer[0])
-            # For a 1-row CSR matrix:
-            # indptr is [0, n_items], indices are the column indices, data is the values
-            # However, we must ensure columns are sorted and unique for standard behavior.
-            # Using COO -> CSR handles this perfectly in C.
-            # Micro-opt: use np.zeros for the row indices.
-            rows = np.zeros(n_items, dtype=np.int32)
-            self.actives = coo_matrix((self.active_updates_buffer[0],
-                                       (rows, self.active_updates_buffer[1])),
-                                      shape=(1,tm_size_flat), dtype=bool).tocsr()
+            # Use raw numpy construction for exact indices
+            indices = np.unique(self.active_updates_buffer[1]).astype(np.int32)
+            data = np.ones(len(indices), dtype=bool)
+            indptr = np.array([0, len(indices)], dtype=np.int32)
+            self.actives = csr_matrix((data, indices, indptr), shape=(1, tm_size_flat))
+
         if len(self.winner_updates_buffer[0]):
-            n_items = len(self.winner_updates_buffer[0])
-            rows = np.zeros(n_items, dtype=np.int32)
-            self.winners = coo_matrix((self.winner_updates_buffer[0],
-                                       (rows, self.winner_updates_buffer[1])),
-                                      shape=(1,tm_size_flat), dtype=bool).tocsr()
+            indices = np.unique(self.winner_updates_buffer[1]).astype(np.int32)
+            data = np.ones(len(indices), dtype=bool)
+            indptr = np.array([0, len(indices)], dtype=np.int32)
+            self.winners = csr_matrix((data, indices, indptr), shape=(1, tm_size_flat))
 
 
     def step_end(self):
@@ -493,21 +487,28 @@ class TemporalMemory(object):
         else:
             self._cached_scale = 1.0
 
-        activated_set = set(activated_cols)
-        for col in activated_cols:
-            # For each active SP column, either...
-            if self.get_activated_segs_for_col_count(col) > 0:
-                # ...activate the cell(s) predicted for that column
-                self.activate_predicted_col(col)
-            else:
-                # ...or burst all cells
-                self.burst(col)
+        # Vectorize processing loops
+        activated_arr = np.asarray(activated_cols)
+        # Identify which columns have active segments vs which need to burst
+        active_counts = self.actives_per_col[activated_arr]
+
+        predicted_mask = active_counts > 0
+        predicted_cols = activated_arr[predicted_mask]
+        burst_cols = activated_arr[~predicted_mask]
+
+        for col in predicted_cols:
+            self.activate_predicted_col(col)
+
+        for col in burst_cols:
+            self.burst(col)
 
         if perm_dec_predict_step > 0:
             matching_cols = np.nonzero(self.matches_per_col)[0]
-            for col in matching_cols:
-                if col not in activated_set:
-                    self.punish_predicted(col)
+            # Use np.setdiff1d to efficiently find elements in matching_cols NOT in activated_cols
+            # assume_unique=True is safe here as both are indices of columns
+            punish_cols = np.setdiff1d(matching_cols, activated_arr, assume_unique=True)
+            for col in punish_cols:
+                self.punish_predicted(col)
 
         # The previous steps generated lists of updates to perform to the synapses and active/winner cells,
         # but they still have to be actually applied to the sparse matrices
