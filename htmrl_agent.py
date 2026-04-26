@@ -104,9 +104,7 @@ class HTMRLAgent:
         if step == 0:
             self.tm.reset()
             self.planet_history = {}
-            self.last_empire_value = 0.0
-            self.last_total_ships = 0
-            self.last_num_planets = 0
+            self.last_eega = 0.0
             
         # Compute velocities for planets based on history
         velocity_map = {}
@@ -120,43 +118,32 @@ class HTMRLAgent:
 
         my_planets = [p for p in planets if p.owner == player]
 
-        # --- Biological Reward Calculation ---
-        my_ships = sum(p.ships for p in my_planets) + sum(f.ships for f in fleets if f.owner == player)
-        my_prod = sum(p.production for p in my_planets)
+        # --- Expected End-Game Advantage (EEGA) Reward Calculation ---
+        remaining_turns = max(0, 500 - step)
 
-        strongest_enemy_ships = 0
-        strongest_enemy_prod = 0
+        my_current_ships = sum(p.ships for p in my_planets) + sum(f.ships for f in fleets if f.owner == player)
+        my_prod = sum(p.production for p in my_planets)
+        my_expected_end_ships = my_current_ships + (my_prod * remaining_turns)
+
+        strongest_enemy_expected = 0
         for e in range(1, 4):
             if e == player: continue
             e_ships = sum(p.ships for p in planets if p.owner == e) + sum(f.ships for f in fleets if f.owner == e)
             e_prod = sum(p.production for p in planets if p.owner == e)
-            if e_ships > strongest_enemy_ships:
-                strongest_enemy_ships = e_ships
-                strongest_enemy_prod = e_prod
+            e_expected = e_ships + (e_prod * remaining_turns)
 
-        # Base Empire Value (Survival signal)
-        empire_value = (my_ships - strongest_enemy_ships) + 10 * (my_prod - strongest_enemy_prod)
-        continuous_reward = empire_value - getattr(self, 'last_empire_value', 0.0)
-        self.last_empire_value = empire_value
+            if e_expected > strongest_enemy_expected:
+                strongest_enemy_expected = e_expected
 
-        # Dopamine Hit (Captured a planet)
-        num_planets = len(my_planets)
-        if num_planets > getattr(self, 'last_num_planets', 0):
-            continuous_reward += 100.0 # Huge positive spike for conquering
-        self.last_num_planets = num_planets
+        current_eega = my_expected_end_ships - strongest_enemy_expected
 
-        # Pain Signal (Ships destroyed unexpectedly - void or sun)
-        # Production naturally adds `my_prod` ships per turn. If we lost more than we produced,
-        # and it wasn't due to combat (which affects empire_value), it's bad.
-        # Empire value mostly handles combat, but explicit pain for pure loss speeds up avoidance.
-        expected_ships = getattr(self, 'last_total_ships', 0) + my_prod
-        if step > 1 and my_ships < expected_ships:
-            # We lost ships. Check if it was a combat trade (enemy ships also dropped)
-            # If not combat, we hit the sun or void. Apply sharp penalty.
-            loss = expected_ships - my_ships
-            continuous_reward -= loss * 0.5
+        # The dense reward is simply the delta in our expected win margin
+        if step == 0:
+            continuous_reward = 0.0
+        else:
+            continuous_reward = current_eega - getattr(self, 'last_eega', 0.0)
 
-        self.last_total_ships = my_ships
+        self.last_eega = current_eega
         # --- End Reward Calculation ---
 
         if not my_planets:
@@ -217,10 +204,6 @@ class HTMRLAgent:
                 continue
                 
             moves.append([closest_planet.id, angle, ships_to_send])
-
-            # Metabolic cost: penalize sending ships very slightly to prevent pointless spam
-            if learn:
-                continuous_reward -= ships_to_send * 0.05
 
             # 6. Update internal mock state for next query in loop
             mutable_ships[closest_planet.id] -= ships_to_send
