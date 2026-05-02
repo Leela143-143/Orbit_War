@@ -19,28 +19,51 @@ def fleet_speed(ships):
     ratio = math.log(max(1, ships)) / math.log(1000.0)
     return 1.0 + (MAX_SPEED - 1.0) * (max(0.0, min(1.0, ratio)) ** 1.5)
 
-def segment_hits_circle(x1, y1, x2, y2, cx, cy, r):
-    if x1 < x2:
-        if cx + r < x1 or cx - r > x2: return False
-    else:
-        if cx + r < x2 or cx - r > x1: return False
-    if y1 < y2:
-        if cy + r < y1 or cy - r > y2: return False
-    else:
-        if cy + r < y2 or cy - r > y1: return False
+def point_to_segment_distance(px, py, vx, vy, wx, wy):
+    l2 = (vx - wx) ** 2 + (vy - wy) ** 2
+    if l2 == 0.0:
+        return math.hypot(px - vx, py - vy)
+    t = max(0.0, min(1.0, ((px - vx) * (wx - vx) + (py - vy) * (wy - vy)) / l2))
+    proj_x = vx + t * (wx - vx)
+    proj_y = vy + t * (wy - vy)
+    return math.hypot(px - proj_x, py - proj_y)
+
+def env_segment_hits_circle(x1, y1, x2, y2, cx, cy, r):
+    return point_to_segment_distance(cx, cy, x1, y1, x2, y2) < r
+
+def simulate_fleet_path(sx, sy, sr, tgt_path, tgt_r, ships, start_angle, planets, traj, target_id, src_id, max_turns=150):
+    fx = sx + math.cos(start_angle) * (sr + 0.1)
+    fy = sy + math.sin(start_angle) * (sr + 0.1)
+    sp = fleet_speed(ships)
+    vx = math.cos(start_angle) * sp
+    vy = math.sin(start_angle) * sp
+
+    for t in range(1, max_turns + 1):
+        nx = fx + vx
+        ny = fy + vy
         
-    dx, dy = x2 - x1, y2 - y1
-    fx, fy = x1 - cx, y1 - cy
-    a = dx*dx + dy*dy
-    if a < 1e-9: return math.hypot(fx, fy) <= r
-    b = 2*(fx*dx + fy*dy)
-    c = fx*fx + fy*fy - r*r
-    disc = b*b - 4*a*c
-    if disc < 0: return False
-    disc = math.sqrt(disc)
-    t1 = (-b - disc) / (2*a)
-    t2 = (-b + disc) / (2*a)
-    return (0 <= t1 <= 1) or (0 <= t2 <= 1)
+        if not (0 <= nx <= BOARD and 0 <= ny <= BOARD): return -1
+        if env_segment_hits_circle(fx, fy, nx, ny, CENTER_X, CENTER_Y, SUN_R): return -1
+
+        for p in planets:
+            p_traj = traj[p.id]
+            if t >= len(p_traj): continue
+            px, py = p_traj[t-1]
+            if math.hypot(px - nx, py - ny) > p.radius + 25: continue
+            npx, npy = p_traj[t]
+
+            hit = False
+            if point_to_segment_distance(px, py, fx, fy, nx, ny) < p.radius:
+                hit = True
+            elif point_to_segment_distance(nx, ny, px, py, npx, npy) < p.radius:
+                hit = True
+
+            if hit:
+                if p.id == target_id: return t
+                else: return -1
+
+        fx, fy = nx, ny
+    return -1
 
 def estimate_arrival(sx, sy, tx, ty, ships, r_src=0.0, r_tgt=0.0):
     d = max(0.0, dist(sx, sy, tx, ty) - r_src - 0.1 - r_tgt)
@@ -53,8 +76,8 @@ def estimate_arrival(sx, sy, tx, ty, ships, r_src=0.0, r_tgt=0.0):
 def predict_planet_pos(planet, initial_by_id, ang_vel, turns):
     init = initial_by_id.get(planet.id)
     if init is None: return planet.x, planet.y
-    orbital_r = dist(init.x, init.y, CENTER_X, CENTER_Y)
-    if orbital_r + init.radius >= 50.0: return planet.x, planet.y
+    orbital_r = math.hypot(init.x - CENTER_X, init.y - CENTER_Y)
+    if orbital_r + planet.radius >= 50.0: return planet.x, planet.y
     cur_ang = math.atan2(planet.y - CENTER_Y, planet.x - CENTER_X)
     new_ang = cur_ang + ang_vel * turns
     return CENTER_X + orbital_r * math.cos(new_ang), CENTER_Y + orbital_r * math.sin(new_ang)
@@ -88,13 +111,29 @@ def predict_comet_pos(planet_id, comets, turns):
 
 def predict_pos(planet, initial_by_id, ang_vel, comets, comet_ids, turns):
     if planet.id in comet_ids:
-        return predict_comet_pos(planet.id, comets, turns)
+        for g in comets:
+            pids = g.get("planet_ids", [])
+            if planet.id not in pids: continue
+            idx = pids.index(planet.id)
+            paths = g.get("paths", [])
+            path_index = g.get("path_index", 0)
+            if idx >= len(paths): return None
+            path = paths[idx]
+            future_idx = path_index + int(turns)
+            if 0 <= future_idx < len(path): return path[future_idx][0], path[future_idx][1]
+            return None
+        return None
     return predict_planet_pos(planet, initial_by_id, ang_vel, turns)
 
 def precompute_trajectories(planets, initial_by_id, ang_vel, comets, comet_ids, max_turns):
     traj = {}
     for p in planets:
-        traj[p.id] = [predict_pos(p, initial_by_id, ang_vel, comets, comet_ids, t) for t in range(1, max_turns + 1)]
+        path = [(p.x, p.y)]
+        for t in range(1, max_turns + 1):
+            pos = predict_pos(p, initial_by_id, ang_vel, comets, comet_ids, t)
+            if pos is None: break
+            path.append(pos)
+        traj[p.id] = path
     return traj
 
 # ==========================================
@@ -109,15 +148,17 @@ def build_threat_map(fleets, planets, traj, max_turns=150):
         for t in range(1, max_turns + 1):
             nx, ny = fx + vx, fy + vy
             if not (0 <= nx <= BOARD and 0 <= ny <= BOARD): break
-            if segment_hits_circle(fx, fy, nx, ny, CENTER_X, CENTER_Y, SUN_R): break
+            if env_segment_hits_circle(fx, fy, nx, ny, CENTER_X, CENTER_Y, SUN_R): break
             
             hit_pid = None
             for p in planets:
-                if t - 1 >= len(traj[p.id]): continue
-                pos = traj[p.id][t - 1]
-                if pos is None: continue
-                px, py = pos
-                if segment_hits_circle(fx, fy, nx, ny, px, py, p.radius):
+                p_traj = traj[p.id]
+                if t >= len(p_traj): continue
+                px, py = p_traj[t-1]
+                if math.hypot(px - nx, py - ny) > p.radius + 25: continue
+                npx, npy = p_traj[t]
+
+                if point_to_segment_distance(px, py, fx, fy, nx, ny) < p.radius or point_to_segment_distance(nx, ny, px, py, npx, npy) < p.radius:
                     hit_pid = p.id
                     break
             
@@ -225,42 +266,44 @@ def safe_reserve(planet, arrivals, player, remaining_steps):
 # ==========================================
 # AIMING & VERIFICATION
 # ==========================================
-def path_blocked_by_planet(src, target, angle, ships, planets, traj, turns):
-    sp = fleet_speed(ships)
-    vx, vy = math.cos(angle) * sp, math.sin(angle) * sp
-    fx, fy = src.x + math.cos(angle)*(src.radius + 0.1), src.y + math.sin(angle)*(src.radius + 0.1)
+def precise_aim(src, tgt, ships, planets, traj, max_turns):
+    tgt_path = traj[tgt.id]
     
-    for t in range(1, turns + 1):
-        nx, ny = fx + vx, fy + vy
-        if segment_hits_circle(fx, fy, nx, ny, CENTER_X, CENTER_Y, SUN_R): return True
-        for p in planets:
-            if p.id == target.id or p.id == src.id: continue
-            if t - 1 >= len(traj[p.id]): continue
-            pos = traj[p.id][t - 1]
-            if pos is None: continue
-            px, py = pos
-            if segment_hits_circle(fx, fy, nx, ny, px, py, p.radius): return True
-        fx, fy = nx, ny
-    return False
+    tx, ty = tgt.x, tgt.y
+    for _ in range(5):
+        d = max(0.0, math.hypot(tx - src.x, ty - src.y) - src.radius - 0.1 - tgt.radius)
+        t = max(1, int(math.ceil(d / fleet_speed(ships))))
+        if t >= len(tgt_path): return None, None
+        tx, ty = tgt_path[t]
 
-def aim_and_need(src, target, arrivals, player, remaining_steps, planets, traj, initial_by_id, ang_vel, comets, comet_ids):
+    angle = math.atan2(ty - src.y, tx - src.x)
+    actual_t = simulate_fleet_path(src.x, src.y, src.radius, tgt_path, tgt.radius, ships, angle, planets, traj, tgt.id, src.id, max_turns)
+
+    if actual_t != -1: return actual_t, angle
+
+    expected = max(1, int(math.ceil(math.hypot(tx - src.x, ty - src.y) / fleet_speed(ships))))
+
+    for t_offset in range(-3, 4):
+        t = expected + t_offset
+        if t < 1 or t >= len(tgt_path): continue
+        tx, ty = tgt_path[t]
+        angle = math.atan2(ty - src.y, tx - src.x)
+        actual_t = simulate_fleet_path(src.x, src.y, src.radius, tgt_path, tgt.radius, ships, angle, planets, traj, tgt.id, src.id, min(max_turns, t + 2))
+        if actual_t != -1: return actual_t, angle
+
+    return None, None
+
+def aim_and_need(src, target, arrivals, player, remaining_steps, planets, traj):
     low, high = 1, 1500
     best = None
     
     while low <= high:
         mid = (low + high) // 2
-        tx, ty = target.x, target.y
-        for _ in range(5):
-            _, turns = estimate_arrival(src.x, src.y, tx, ty, mid, src.radius, target.radius)
-            pos = predict_pos(target, initial_by_id, ang_vel, comets, comet_ids, turns)
-            if pos is None: break
-            tx, ty = pos[0], pos[1]
-            
-        if pos is None: 
+        turns, angle = precise_aim(src, target, mid, planets, traj, remaining_steps)
+        if turns is None:
             high = mid - 1
             continue
             
-        angle, turns = estimate_arrival(src.x, src.y, tx, ty, mid, src.radius, target.radius)
         owner, _ = simulate_planet(target, arrivals, test_fleet=(turns, mid, player), max_turn=min(150, remaining_steps))
         
         if owner == player:
@@ -272,16 +315,9 @@ def aim_and_need(src, target, arrivals, player, remaining_steps, planets, traj, 
     if best is None: return None
     
     send = max(10, int(best * 1.15))
+    turns, angle = precise_aim(src, target, send, planets, traj, remaining_steps)
+    if turns is None: return None
     
-    tx, ty = target.x, target.y
-    for _ in range(5):
-        angle, turns = estimate_arrival(src.x, src.y, tx, ty, send, src.radius, target.radius)
-        pos = predict_pos(target, initial_by_id, ang_vel, comets, comet_ids, turns)
-        if pos is None: return None
-        tx, ty = pos[0], pos[1]
-    angle, turns = estimate_arrival(src.x, src.y, tx, ty, send, src.radius, target.radius)
-    
-    if path_blocked_by_planet(src, target, angle, send, planets, traj, turns): return None
     return send, angle, turns
 
 # ==========================================
@@ -342,10 +378,10 @@ def agent(obs):
         candidates.sort(key=lambda x: -x[0])
         
         # CPU OPTIMIZATION: Only evaluate the top 10 most valuable targets
-        for _, tgt in candidates[:10]:
+        for _, tgt in candidates[:7]:
             if available < 10: break
             
-            result = aim_and_need(src, tgt, arrivals.get(tgt.id, {}), player, remaining, planets, traj, initial_by_id, ang_vel, comets, comet_ids)
+            result = aim_and_need(src, tgt, arrivals.get(tgt.id, {}), player, remaining, planets, traj)
             if result is None: continue
             
             send, angle, turns = result
