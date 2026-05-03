@@ -55,3 +55,4 @@ kaggle-environments/
 
 # LFS config (not needed for new repo)
 .lfsconfig
+replay.json
