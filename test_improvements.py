@@ -15,19 +15,19 @@ def run_test(n_games=5):
         
         if r0 > r1:
             wins[0] += 1
-            result = "NEW wins"
+            result = "OLD wins"
         elif r1 > r0:
             wins[1] += 1
-            result = "OLD wins"
+            result = "NEW wins"
         else:
             draws += 1
             result = "DRAW"
         
-        print(f"Game {i+1}: P0(new)={r0:.0f}  P1(old)={r1:.0f}  -> {result}")
+        print(f"Game {i+1}: P0(old)={r0:.0f}  P1(new)={r1:.0f}  -> {result}")
     
     print(f"\n--- Summary ({n_games} games) ---")
-    print(f"NEW bot wins: {wins[0]}")
-    print(f"OLD bot wins: {wins[1]}")
+    print(f"OLD bot wins: {wins[0]}")
+    print(f"NEW bot wins: {wins[1]}")
     print(f"Draws: {draws}")
 
 if __name__ == "__main__":
