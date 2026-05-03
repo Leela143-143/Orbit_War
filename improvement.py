@@ -315,6 +315,10 @@ def agent(obs):
     for src in my_planets:
         lifespan = get_comet_lifespan(src.id, comets) if src.id in comet_ids else 500
         res = safe_reserve(src, arrivals.get(src.id, {}), player, remaining)
+
+        # Strategic Sacrifice: Free up defensive ships on weak planets for aggressive use
+        if src.production <= 2 and res > src.ships * 0.8:
+            res = int(src.ships * 0.5)
         available = src.ships - res
 
         # --- COMET EVACUATION PROTOCOL ---
@@ -343,14 +347,39 @@ def agent(obs):
         candidates = []
         for tgt in planets:
             if src.id == tgt.id: continue
-            score = tgt.production / max(1.0, dist(src.x, src.y, tgt.x, tgt.y))
-            if tgt.owner != player and tgt.owner != -1: score *= 1.5
+
+            d = max(1.0, dist(src.x, src.y, tgt.x, tgt.y))
+            score = tgt.production / d
+
+            # Dynamic multiplier based on state (offense, defense, neutral expansion)
+            if tgt.owner != player and tgt.owner != -1:
+                # Offensive target
+                score *= 1.5
+            elif tgt.owner == -1:
+                # Neutral target: Prioritize them significantly since they are cheap
+                score *= 1.25
+            elif tgt.owner == player:
+                # Defense: If it's a friendly planet, is it under threat?
+                arrs = arrivals.get(tgt.id, {})
+                threatened = False
+                for t, o_s in arrs.items():
+                    for o, s in o_s.items():
+                        if o != player and o != -1 and s > 0:
+                            threatened = True
+                            break
+                    if threatened: break
+
+                if threatened:
+                    # Defense is highly valuable to save production swing
+                    score *= 1.8
+                else:
+                    score = 0.0 # Don't reinforce safe planets
+
             candidates.append((score, tgt))
 
         candidates.sort(key=lambda x: -x[0])
 
-        # CPU OPTIMIZATION: Only evaluate the top 10 most valuable targets
-        for _, tgt in candidates[:10]:
+        for _, tgt in candidates[:12]:
             if available < 10: break
 
             result = aim_and_need(src, tgt, arrivals.get(tgt.id, {}), player, remaining, planets, traj, initial_by_id, ang_vel, comets, comet_ids)
@@ -367,6 +396,7 @@ def agent(obs):
             profit = (V_B - send) - V_A
 
             if profit > 0:
+                # If we are defending, we don't send ships if they would arrive AFTER the planet falls
                 moves.append([src.id, float(angle), int(send)])
                 arrivals[tgt.id][turns][player] += send
                 available -= send
