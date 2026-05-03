@@ -7,7 +7,7 @@ def run_test(n_games=5):
     
     for i in range(n_games):
         env = make("orbit_wars", debug=True)
-        env.run(["main.py", "improvement.py"])
+        env.run(["improvement.py", "main.py"])
         
         final = env.steps[-1]
         r0 = final[0].reward
