@@ -184,6 +184,7 @@ def simulate_planet(planet, arrivals, test_fleet=None, max_turn=100):
                             owner = surv_o
                             ships = surv_s - ships
                         elif surv_s == ships:
+                            owner = -1
                             ships = 0
                         else:
                             ships -= surv_s
@@ -323,7 +324,13 @@ def agent(obs):
                 friends = [p for p in my_planets if p.id != src.id and p.id not in comet_ids]
                 if friends:
                     best_f = min(friends, key=lambda f: dist(src.x, src.y, f.x, f.y))
-                    angle = math.atan2(best_f.y - src.y, best_f.x - src.x)
+                    tx, ty = best_f.x, best_f.y
+                    for _ in range(5):
+                        _, turns = estimate_arrival(src.x, src.y, tx, ty, available, src.radius, best_f.radius)
+                        pos = predict_pos(best_f, initial_by_id, ang_vel, comets, comet_ids, turns)
+                        if pos is None: break
+                        tx, ty = pos[0], pos[1]
+                    angle, _ = estimate_arrival(src.x, src.y, tx, ty, available, src.radius, best_f.radius)
                 else:
                     corners = [(0,0), (0,100), (100,0), (100,100)]
                     best_c = max(corners, key=lambda c: dist(src.x, src.y, c[0], c[1]))
@@ -342,8 +349,8 @@ def agent(obs):
 
         candidates.sort(key=lambda x: -x[0])
 
-        # CPU OPTIMIZATION: Only evaluate the top 30 most valuable targets
-        for _, tgt in candidates[:30]:
+        # CPU OPTIMIZATION: Only evaluate the top 10 most valuable targets
+        for _, tgt in candidates[:10]:
             if available < 10: break
 
             result = aim_and_need(src, tgt, arrivals.get(tgt.id, {}), player, remaining, planets, traj, initial_by_id, ang_vel, comets, comet_ids)
