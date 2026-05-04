@@ -209,17 +209,38 @@ def evaluate_timeline(planet, arrivals, player, remaining_steps, is_ffa, comet_l
     else: return 0 if is_ffa else -ships
 
 def safe_reserve(planet, arrivals, player, remaining_steps):
-    low, high = 0, planet.ships
+    # Coarse-to-fine search instead of binary search to handle non-monotonicity
     best = planet.ships
-    while low <= high:
-        mid = (low + high) // 2
-        dummy_p = Planet(planet.id, planet.owner, planet.x, planet.y, planet.radius, mid, planet.production)
+    step = max(10, planet.ships // 10)
+    found_winning_range = False
+
+    # 1. Coarse search (stepping down)
+    current_test = planet.ships
+    while True:
+        dummy_p = Planet(planet.id, planet.owner, planet.x, planet.y, planet.radius, current_test, planet.production)
         owner_end, _ = simulate_planet(dummy_p, arrivals, max_turn=min(150, remaining_steps))
+
         if owner_end == player:
-            best = mid
-            high = mid - 1
+            best = current_test
+            if current_test == 0:
+                break
+            current_test = max(0, current_test - step)
         else:
-            low = mid + 1
+            found_winning_range = True
+            break
+
+    # 2. Fine search (if needed, checking upwards from the last failing point)
+    if found_winning_range and current_test < best:
+        fine_start = max(0, current_test + 1)
+        fine_end = best - 1
+
+        for fine_test in range(fine_start, fine_end + 1):
+            dummy_p = Planet(planet.id, planet.owner, planet.x, planet.y, planet.radius, fine_test, planet.production)
+            owner_end, _ = simulate_planet(dummy_p, arrivals, max_turn=min(150, remaining_steps))
+            if owner_end == player:
+                best = fine_test
+                break
+
     return best
 
 # ==========================================
@@ -244,30 +265,58 @@ def path_blocked_by_planet(src, target, angle, ships, planets, traj, turns):
     return False
 
 def aim_and_need(src, target, arrivals, player, remaining_steps, planets, traj, initial_by_id, ang_vel, comets, comet_ids):
-    low, high = 1, 1500
     best = None
     
-    while low <= high:
-        mid = (low + high) // 2
+    # Coarse-to-fine search
+    step = 50
+    current_test = 10
+    found_winning_range = False
+
+    # 1. Coarse search (stepping up)
+    while current_test <= 1500:
         tx, ty = target.x, target.y
         for _ in range(5):
-            _, turns = estimate_arrival(src.x, src.y, tx, ty, mid, src.radius, target.radius)
+            _, turns = estimate_arrival(src.x, src.y, tx, ty, current_test, src.radius, target.radius)
             pos = predict_pos(target, initial_by_id, ang_vel, comets, comet_ids, turns)
             if pos is None: break
             tx, ty = pos[0], pos[1]
             
         if pos is None: 
-            high = mid - 1
+            current_test += step
             continue
             
-        angle, turns = estimate_arrival(src.x, src.y, tx, ty, mid, src.radius, target.radius)
-        owner, _ = simulate_planet(target, arrivals, test_fleet=(turns, mid, player), max_turn=min(150, remaining_steps))
+        angle, turns = estimate_arrival(src.x, src.y, tx, ty, current_test, src.radius, target.radius)
+        owner, _ = simulate_planet(target, arrivals, test_fleet=(turns, current_test, player), max_turn=min(150, remaining_steps))
         
         if owner == player:
-            best = mid
-            high = mid - 1
+            best = current_test
+            found_winning_range = True
+            break
         else:
-            low = mid + 1
+            current_test += step
+
+    # 2. Fine search (stepping down from the first winning coarse point)
+    if found_winning_range and best is not None:
+        fine_start = max(1, best - step + 1)
+        fine_end = best - 1
+
+        # Test backwards to find the minimum
+        for fine_test in range(fine_end, fine_start - 1, -1):
+            tx, ty = target.x, target.y
+            for _ in range(5):
+                _, turns = estimate_arrival(src.x, src.y, tx, ty, fine_test, src.radius, target.radius)
+                pos = predict_pos(target, initial_by_id, ang_vel, comets, comet_ids, turns)
+                if pos is None: break
+                tx, ty = pos[0], pos[1]
+
+            if pos is None: break
+
+            angle, turns = estimate_arrival(src.x, src.y, tx, ty, fine_test, src.radius, target.radius)
+            owner, _ = simulate_planet(target, arrivals, test_fleet=(turns, fine_test, player), max_turn=min(150, remaining_steps))
+            if owner == player:
+                best = fine_test
+            else:
+                break
             
     if best is None: return None
     
@@ -288,6 +337,9 @@ def aim_and_need(src, target, arrivals, player, remaining_steps, planets, traj, 
 # MAIN AGENT
 # ==========================================
 def agent(obs):
+    import time
+    start_time = time.time()
+
     get = obs.get if isinstance(obs, dict) else lambda k, d=None: getattr(obs, k, d)
     player        = get("player", 0)
     step          = get("step", 0) or 0
@@ -307,60 +359,159 @@ def agent(obs):
     
     traj = precompute_trajectories(planets, initial_by_id, ang_vel, comets, comet_ids, max_turns=250)
     arrivals = build_threat_map(fleets, planets, traj, max_turns=150)
-    moves = []
     
+    planet_state = []
 
     for src in my_planets:
         lifespan = get_comet_lifespan(src.id, comets) if src.id in comet_ids else 500
         res = safe_reserve(src, arrivals.get(src.id, {}), player, remaining)
+
+        # Maximize aggressiveness:
+        if src.production <= 3 and res > src.ships * 0.4:
+            res = int(src.ships * 0.1) # Extreme drop reserve
+
         available = src.ships - res
         
-        # --- COMET EVACUATION PROTOCOL ---
+        evac_move = None
         if lifespan <= 5:
             available = src.ships
             if available > 0:
                 friends = [p for p in my_planets if p.id != src.id and p.id not in comet_ids]
                 if friends:
                     best_f = min(friends, key=lambda f: dist(src.x, src.y, f.x, f.y))
-                    angle = math.atan2(best_f.y - src.y, best_f.x - src.x)
+                    tx, ty = best_f.x, best_f.y
+                    for _ in range(5):
+                        _, turns = estimate_arrival(src.x, src.y, tx, ty, available, src.radius, best_f.radius)
+                        pos = predict_pos(best_f, initial_by_id, ang_vel, comets, comet_ids, turns)
+                        if pos is None: break
+                        tx, ty = pos[0], pos[1]
+                    angle, _ = estimate_arrival(src.x, src.y, tx, ty, available, src.radius, best_f.radius)
                 else:
                     corners = [(0,0), (0,100), (100,0), (100,100)]
                     best_c = max(corners, key=lambda c: dist(src.x, src.y, c[0], c[1]))
                     angle = math.atan2(best_c[1] - src.y, best_c[0] - src.x)
-                moves.append([src.id, float(angle), int(available)])
-            continue
+                evac_move = [src.id, float(angle), int(available)]
+
+        if evac_move:
+            planet_state.append({'src': src, 'available': 0, 'evac_move': evac_move})
+        else:
+            planet_state.append({'src': src, 'available': available, 'evac_move': None})
+
+    BEAM_WIDTH = 25 # Increased width
+    import copy
+
+    def copy_arrivals(arrs):
+        new_arrs = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+        for pid, turns_dict in arrs.items():
+            for t, owner_dict in turns_dict.items():
+                for o, count in owner_dict.items():
+                    new_arrs[pid][t][o] = count
+        return new_arrs
+
+    beam = [(0.0, [], {ps['src'].id: ps['available'] for ps in planet_state}, copy_arrivals(arrivals))]
+
+    # Prioritize planets with a lot of available ships
+    planet_state.sort(key=lambda ps: -ps['available'])
+
+    for ps in planet_state:
+        src = ps['src']
         
-        if available < 10: continue
+        if ps['evac_move']:
+            new_beam = []
+            for score, moves, avail_dict, arrs in beam:
+                new_moves = moves + [ps['evac_move']]
+                new_beam.append((score, new_moves, avail_dict, arrs))
+            beam = new_beam
+            continue
+
+        base_available = ps['available']
+        if base_available < 10:
+            continue
             
         candidates = []
         for tgt in planets:
             if src.id == tgt.id: continue
-            score = tgt.production / max(1.0, dist(src.x, src.y, tgt.x, tgt.y))
-            if tgt.owner != player and tgt.owner != -1: score *= 1.5
-            candidates.append((score, tgt))
-            
+
+            d = max(1.0, dist(src.x, src.y, tgt.x, tgt.y))
+            tgt_score = tgt.production / d
+
+            if tgt.owner != player and tgt.owner != -1:
+                tgt_score *= 2.5  # Heavy offense
+            elif tgt.owner == -1:
+                tgt_score *= 2.0  # Heavy expansion
+            elif tgt.owner == player:
+                arrs = arrivals.get(tgt.id, {})
+                threatened = False
+                for t, o_s in arrs.items():
+                    for o, s in o_s.items():
+                        if o != player and o != -1 and s > 0:
+                            threatened = True
+                            break
+                    if threatened: break
+
+                if threatened:
+                    tgt_score *= 4.0  # Crucial defense
+                else:
+                    tgt_score = 0.0
+
+            if tgt_score > 0:
+                candidates.append((tgt_score, tgt))
+
         candidates.sort(key=lambda x: -x[0])
+        top_candidates = candidates[:20]
         
-        # CPU OPTIMIZATION: Only evaluate the top 10 most valuable targets
-        for _, tgt in candidates[:10]:
-            if available < 10: break
+        new_beam = []
+
+        for state_score, state_moves, avail_dict, state_arrs in beam:
+            available = avail_dict[src.id]
             
-            result = aim_and_need(src, tgt, arrivals.get(tgt.id, {}), player, remaining, planets, traj, initial_by_id, ang_vel, comets, comet_ids)
-            if result is None: continue
+            # Action 1: Do nothing
+            new_beam.append((state_score, state_moves.copy(), avail_dict.copy(), copy_arrivals(state_arrs)))
             
-            send, angle, turns = result
-            if turns > remaining: continue
-            if send > available: continue
-            
-            tgt_life = get_comet_lifespan(tgt.id, comets) if tgt.id in comet_ids else 500
-            
-            V_A = evaluate_timeline(tgt, arrivals.get(tgt.id, {}), player, remaining, is_ffa, tgt_life)
-            V_B = evaluate_timeline(tgt, arrivals.get(tgt.id, {}), player, remaining, is_ffa, tgt_life, test_fleet=(turns, send, player))
-            profit = (V_B - send) - V_A
-            
-            if profit > 0:
-                moves.append([src.id, float(angle), int(send)])
-                arrivals[tgt.id][turns][player] += send
-                available -= send
+            if time.time() - start_time > 0.8:
+                break
+
+            for _, tgt in top_candidates:
+                if available < 10: break
+
+                result = aim_and_need(src, tgt, state_arrs.get(tgt.id, {}), player, remaining, planets, traj, initial_by_id, ang_vel, comets, comet_ids)
+                if result is None: continue
+
+                send, angle, turns = result
+                if turns > remaining: continue
+                if send > available: continue
                 
-    return moves
+                tgt_life = get_comet_lifespan(tgt.id, comets) if tgt.id in comet_ids else 500
+
+                V_A = evaluate_timeline(tgt, state_arrs.get(tgt.id, {}), player, remaining, is_ffa, tgt_life)
+                V_B = evaluate_timeline(tgt, state_arrs.get(tgt.id, {}), player, remaining, is_ffa, tgt_life, test_fleet=(turns, send, player))
+
+                # Boost profit to encourage action
+                profit = (V_B - send) - V_A + 0.5
+
+                if profit > 0:
+                    new_moves = state_moves.copy()
+                    new_moves.append([src.id, float(angle), int(send)])
+
+                    new_avail_dict = avail_dict.copy()
+                    new_avail_dict[src.id] -= send
+
+                    new_arrs = copy_arrivals(state_arrs)
+                    new_arrs[tgt.id][turns][player] += send
+
+                    time_discount = (remaining - turns) / remaining
+                    adjusted_profit = profit * time_discount
+
+                    new_beam.append((state_score + adjusted_profit, new_moves, new_avail_dict, new_arrs))
+
+        new_beam.sort(key=lambda x: -x[0])
+        beam = new_beam[:BEAM_WIDTH]
+
+        if time.time() - start_time > 0.85:
+            break
+
+    if beam:
+        best_state = max(beam, key=lambda x: x[0])
+        return best_state[1]
+
+    return []
