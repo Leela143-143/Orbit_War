@@ -28,7 +28,7 @@ def segment_hits_circle(x1, y1, x2, y2, cx, cy, r):
         if cy + r < y1 or cy - r > y2: return False
     else:
         if cy + r < y2 or cy - r > y1: return False
-
+        
     dx, dy = x2 - x1, y2 - y1
     fx, fy = x1 - cx, y1 - cy
     a = dx*dx + dy*dy
@@ -40,9 +40,7 @@ def segment_hits_circle(x1, y1, x2, y2, cx, cy, r):
     disc = math.sqrt(disc)
     t1 = (-b - disc) / (2*a)
     t2 = (-b + disc) / (2*a)
-    if (0 <= t1 <= 1) or (0 <= t2 <= 1): return True
-    if t1 < 0 and t2 > 1: return True
-    return False
+    return (0 <= t1 <= 1) or (0 <= t2 <= 1)
 
 def estimate_arrival(sx, sy, tx, ty, ships, r_src=0.0, r_tgt=0.0):
     d = max(0.0, dist(sx, sy, tx, ty) - r_src - 0.1 - r_tgt)
@@ -112,7 +110,7 @@ def build_threat_map(fleets, planets, traj, max_turns=150):
             nx, ny = fx + vx, fy + vy
             if not (0 <= nx <= BOARD and 0 <= ny <= BOARD): break
             if segment_hits_circle(fx, fy, nx, ny, CENTER_X, CENTER_Y, SUN_R): break
-
+            
             hit_pid = None
             for p in planets:
                 if t - 1 >= len(traj[p.id]): continue
@@ -122,7 +120,7 @@ def build_threat_map(fleets, planets, traj, max_turns=150):
                 if segment_hits_circle(fx, fy, nx, ny, px, py, p.radius):
                     hit_pid = p.id
                     break
-
+            
             if hit_pid is not None:
                 arrivals[hit_pid][t][f.owner] += f.ships
                 break
@@ -137,37 +135,37 @@ def simulate_planet(planet, arrivals, test_fleet=None, max_turn=100):
     owner = planet.owner
     ships = planet.ships
     prod = planet.production
-
+    
     events = defaultdict(lambda: defaultdict(int))
     if arrivals:
         for t, arrs in arrivals.items():
             if t > max_turn: continue
             for o, s in arrs.items():
                 events[t][o] += s
-
+                
     if test_fleet:
         arr_t, s, o = test_fleet
         if arr_t <= max_turn:
             events[arr_t][o] += s
-
+            
     if not events:
         if owner != -1:
             ships += prod * max_turn
         return owner, ships
-
+        
     max_event_t = max(events.keys())
     actual_max = min(max_turn, max_event_t)
-
+    
     for t in range(1, actual_max + 1):
         if owner != -1:
             ships += prod
-
+            
         if t in events:
             arrs = events[t]
             att_forces = []
             for o, s in arrs.items():
                 att_forces.append((s, o))
-
+                
             if att_forces:
                 att_forces.sort(reverse=True)
                 if len(att_forces) == 1:
@@ -175,7 +173,7 @@ def simulate_planet(planet, arrivals, test_fleet=None, max_turn=100):
                 else:
                     surv_s = att_forces[0][0] - att_forces[1][0]
                     surv_o = att_forces[0][1] if surv_s > 0 else -1
-
+                
                 if surv_s > 0 and surv_o != -1:
                     if surv_o == owner:
                         ships += surv_s
@@ -188,10 +186,10 @@ def simulate_planet(planet, arrivals, test_fleet=None, max_turn=100):
                             ships = 0
                         else:
                             ships -= surv_s
-
+                            
     if actual_max < max_turn and owner != -1:
         ships += prod * (max_turn - actual_max)
-
+        
     return owner, ships
 
 def evaluate_timeline(planet, arrivals, player, remaining_steps, is_ffa, comet_lifespan, test_fleet=None):
@@ -199,13 +197,13 @@ def evaluate_timeline(planet, arrivals, player, remaining_steps, is_ffa, comet_l
     last_event = 0
     if arrivals: last_event = max(arrivals.keys())
     if test_fleet: last_event = max(last_event, test_fleet[0])
-
+    
     sim_t = min(max_t, last_event)
     owner, ships = simulate_planet(planet, arrivals, test_fleet, sim_t)
-
+    
     post_turns = max_t - sim_t
     if owner != -1: ships += post_turns * planet.production
-
+    
     if owner == player: return ships
     elif owner == -1: return 0
     else: return 0 if is_ffa else -ships
@@ -231,7 +229,7 @@ def path_blocked_by_planet(src, target, angle, ships, planets, traj, turns):
     sp = fleet_speed(ships)
     vx, vy = math.cos(angle) * sp, math.sin(angle) * sp
     fx, fy = src.x + math.cos(angle)*(src.radius + 0.1), src.y + math.sin(angle)*(src.radius + 0.1)
-
+    
     for t in range(1, turns + 1):
         nx, ny = fx + vx, fy + vy
         if segment_hits_circle(fx, fy, nx, ny, CENTER_X, CENTER_Y, SUN_R): return True
@@ -248,7 +246,7 @@ def path_blocked_by_planet(src, target, angle, ships, planets, traj, turns):
 def aim_and_need(src, target, arrivals, player, remaining_steps, planets, traj, initial_by_id, ang_vel, comets, comet_ids):
     low, high = 1, 1500
     best = None
-
+    
     while low <= high:
         mid = (low + high) // 2
         tx, ty = target.x, target.y
@@ -257,24 +255,24 @@ def aim_and_need(src, target, arrivals, player, remaining_steps, planets, traj, 
             pos = predict_pos(target, initial_by_id, ang_vel, comets, comet_ids, turns)
             if pos is None: break
             tx, ty = pos[0], pos[1]
-
-        if pos is None:
+            
+        if pos is None: 
             high = mid - 1
             continue
-
+            
         angle, turns = estimate_arrival(src.x, src.y, tx, ty, mid, src.radius, target.radius)
         owner, _ = simulate_planet(target, arrivals, test_fleet=(turns, mid, player), max_turn=min(150, remaining_steps))
-
+        
         if owner == player:
             best = mid
             high = mid - 1
         else:
             low = mid + 1
-
+            
     if best is None: return None
-
+    
     send = max(10, int(best * 1.15))
-
+    
     tx, ty = target.x, target.y
     for _ in range(5):
         angle, turns = estimate_arrival(src.x, src.y, tx, ty, send, src.radius, target.radius)
@@ -282,7 +280,7 @@ def aim_and_need(src, target, arrivals, player, remaining_steps, planets, traj, 
         if pos is None: return None
         tx, ty = pos[0], pos[1]
     angle, turns = estimate_arrival(src.x, src.y, tx, ty, send, src.radius, target.radius)
-
+    
     if path_blocked_by_planet(src, target, angle, send, planets, traj, turns): return None
     return send, angle, turns
 
@@ -300,23 +298,23 @@ def agent(obs):
     comets        = get("comets", []) or []
     comet_ids     = set(get("comet_planet_ids", []) or [])
     my_planets    = [p for p in planets if p.owner == player]
-
+    
     if not my_planets: return []
 
     remaining = max(1, TOTAL_STEPS - step)
     n_players = len(set([p.owner for p in planets if p.owner != -1]))
     is_ffa = n_players > 2
-
+    
     traj = precompute_trajectories(planets, initial_by_id, ang_vel, comets, comet_ids, max_turns=250)
     arrivals = build_threat_map(fleets, planets, traj, max_turns=150)
     moves = []
-
+    
 
     for src in my_planets:
         lifespan = get_comet_lifespan(src.id, comets) if src.id in comet_ids else 500
         res = safe_reserve(src, arrivals.get(src.id, {}), player, remaining)
         available = src.ships - res
-
+        
         # --- COMET EVACUATION PROTOCOL ---
         if lifespan <= 5:
             available = src.ships
@@ -324,51 +322,45 @@ def agent(obs):
                 friends = [p for p in my_planets if p.id != src.id and p.id not in comet_ids]
                 if friends:
                     best_f = min(friends, key=lambda f: dist(src.x, src.y, f.x, f.y))
-                    tx, ty = best_f.x, best_f.y
-                    for _ in range(5):
-                        _, turns = estimate_arrival(src.x, src.y, tx, ty, available, src.radius, best_f.radius)
-                        pos = predict_pos(best_f, initial_by_id, ang_vel, comets, comet_ids, turns)
-                        if pos is None: break
-                        tx, ty = pos[0], pos[1]
-                    angle, _ = estimate_arrival(src.x, src.y, tx, ty, available, src.radius, best_f.radius)
+                    angle = math.atan2(best_f.y - src.y, best_f.x - src.x)
                 else:
                     corners = [(0,0), (0,100), (100,0), (100,100)]
                     best_c = max(corners, key=lambda c: dist(src.x, src.y, c[0], c[1]))
                     angle = math.atan2(best_c[1] - src.y, best_c[0] - src.x)
                 moves.append([src.id, float(angle), int(available)])
             continue
-
+        
         if available < 10: continue
-
+            
         candidates = []
         for tgt in planets:
             if src.id == tgt.id: continue
             score = tgt.production / max(1.0, dist(src.x, src.y, tgt.x, tgt.y))
             if tgt.owner != player and tgt.owner != -1: score *= 1.5
             candidates.append((score, tgt))
-
+            
         candidates.sort(key=lambda x: -x[0])
-
+        
         # CPU OPTIMIZATION: Only evaluate the top 10 most valuable targets
         for _, tgt in candidates[:10]:
             if available < 10: break
-
+            
             result = aim_and_need(src, tgt, arrivals.get(tgt.id, {}), player, remaining, planets, traj, initial_by_id, ang_vel, comets, comet_ids)
             if result is None: continue
-
+            
             send, angle, turns = result
             if turns > remaining: continue
             if send > available: continue
-
+            
             tgt_life = get_comet_lifespan(tgt.id, comets) if tgt.id in comet_ids else 500
-
+            
             V_A = evaluate_timeline(tgt, arrivals.get(tgt.id, {}), player, remaining, is_ffa, tgt_life)
             V_B = evaluate_timeline(tgt, arrivals.get(tgt.id, {}), player, remaining, is_ffa, tgt_life, test_fleet=(turns, send, player))
             profit = (V_B - send) - V_A
-
+            
             if profit > 0:
                 moves.append([src.id, float(angle), int(send)])
                 arrivals[tgt.id][turns][player] += send
                 available -= send
-
+                
     return moves
