@@ -42,11 +42,6 @@ def segment_hits_circle(x1, y1, x2, y2, cx, cy, r):
     t2 = (-b + disc) / (2*a)
     return (0 <= t1 <= 1) or (0 <= t2 <= 1)
 
-def estimate_arrival(sx, sy, tx, ty, ships, r_src=0.0, r_tgt=0.0):
-    d = max(0.0, dist(sx, sy, tx, ty) - r_src - 0.1 - r_tgt)
-    sp = fleet_speed(ships)
-    return math.atan2(ty - sy, tx - sx), max(1, int(math.ceil(d / sp)))
-
 # ==========================================
 # ORBITAL PREDICTION
 # ==========================================
@@ -61,10 +56,10 @@ def predict_planet_pos(planet, initial_by_id, ang_vel, turns):
 
 def get_comet_lifespan(planet_id, comets):
     for g in comets:
-        pids = g.get("planet_ids", [])
+        pids = g.get("planet_ids",[])
         if planet_id not in pids: continue
         idx = pids.index(planet_id)
-        paths = g.get("paths", [])
+        paths = g.get("paths",[])
         path_index = g.get("path_index", 0)
         if idx >= len(paths): return 0
         path = paths[idx]
@@ -73,10 +68,10 @@ def get_comet_lifespan(planet_id, comets):
 
 def predict_comet_pos(planet_id, comets, turns):
     for g in comets:
-        pids = g.get("planet_ids", [])
+        pids = g.get("planet_ids",[])
         if planet_id not in pids: continue
         idx = pids.index(planet_id)
-        paths = g.get("paths", [])
+        paths = g.get("paths",[])
         path_index = g.get("path_index", 0)
         if idx >= len(paths): return None
         path = paths[idx]
@@ -94,11 +89,11 @@ def predict_pos(planet, initial_by_id, ang_vel, comets, comet_ids, turns):
 def precompute_trajectories(planets, initial_by_id, ang_vel, comets, comet_ids, max_turns):
     traj = {}
     for p in planets:
-        traj[p.id] = [predict_pos(p, initial_by_id, ang_vel, comets, comet_ids, t) for t in range(1, max_turns + 1)]
+        traj[p.id] =[predict_pos(p, initial_by_id, ang_vel, comets, comet_ids, t) for t in range(1, max_turns + 1)]
     return traj
 
 # ==========================================
-# THREAT MAP
+# DISCRETE EVENT SIMULATION
 # ==========================================
 def build_threat_map(fleets, planets, traj, max_turns=150):
     arrivals = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
@@ -128,9 +123,6 @@ def build_threat_map(fleets, planets, traj, max_turns=150):
                 fx, fy = nx, ny
     return arrivals
 
-# ==========================================
-# DISCRETE EVENT SIMULATION
-# ==========================================
 def simulate_planet(planet, arrivals, test_fleet=None, max_turn=100):
     owner = planet.owner
     ships = planet.ships
@@ -162,7 +154,7 @@ def simulate_planet(planet, arrivals, test_fleet=None, max_turn=100):
             
         if t in events:
             arrs = events[t]
-            att_forces = []
+            att_forces =[]
             for o, s in arrs.items():
                 att_forces.append((s, o))
                 
@@ -223,7 +215,7 @@ def safe_reserve(planet, arrivals, player, remaining_steps):
     return best
 
 # ==========================================
-# AIMING & VERIFICATION
+# THE ULTIMATE AUTO-AIM ENGINE
 # ==========================================
 def path_blocked_by_planet(src, target, angle, ships, planets, traj, turns):
     sp = fleet_speed(ships)
@@ -243,24 +235,108 @@ def path_blocked_by_planet(src, target, angle, ships, planets, traj, turns):
         fx, fy = nx, ny
     return False
 
-def aim_and_need(src, target, arrivals, player, remaining_steps, planets, traj, initial_by_id, ang_vel, comets, comet_ids):
-    low, high = 1, 1500
+def future_path_blocked(px, py, tx, ty, t_start, turns, ships, r_src, r_tgt, planets, traj, skip_ids):
+    angle = math.atan2(ty - py, tx - px)
+    sp = fleet_speed(ships)
+    vx, vy = math.cos(angle) * sp, math.sin(angle) * sp
+    
+    fx = px + math.cos(angle) * (r_src + 0.1)
+    fy = py + math.sin(angle) * (r_src + 0.1)
+    
+    end_x, end_y = fx + vx * turns, fy + vy * turns
+    min_x, max_x = min(fx, end_x), max(fx, end_x)
+    min_y, max_y = min(fy, end_y), max(fy, end_y)
+    
+    if not (max_x < CENTER_X - SUN_R or min_x > CENTER_X + SUN_R or max_y < CENTER_Y - SUN_R or min_y > CENTER_Y + SUN_R):
+        if segment_hits_circle(fx, fy, end_x, end_y, CENTER_X, CENTER_Y, SUN_R): return True
+            
+    for k in range(1, turns + 1):
+        nx, ny = fx + vx, fy + vy
+        current_turn = t_start + k
+        for p in planets:
+            if p.id in skip_ids: continue
+            idx = current_turn - 1
+            if idx < len(traj[p.id]) and traj[p.id][idx] is not None:
+                cx, cy = traj[p.id][idx]
+            else:
+                cx, cy = p.x, p.y
+                
+            if max(fx, nx) < cx - p.radius or min(fx, nx) > cx + p.radius: continue
+            if max(fy, ny) < cy - p.radius or min(fy, ny) > cy + p.radius: continue
+            if segment_hits_circle(fx, fy, nx, ny, cx, cy, p.radius): return True
+        fx, fy = nx, ny
+    return False
+
+def flight_hits_target(src, target, angle, ships, traj, max_turns):
+    """Physically simulates the flight frame-by-frame to guarantee an intersection."""
+    sp = fleet_speed(ships)
+    vx, vy = math.cos(angle) * sp, math.sin(angle) * sp
+    fx, fy = src.x + math.cos(angle)*(src.radius + 0.1), src.y + math.sin(angle)*(src.radius + 0.1)
+    
+    for t in range(1, max_turns + 1):
+        nx, ny = fx + vx, fy + vy
+        if t - 1 < len(traj[target.id]) and traj[target.id][t - 1] is not None:
+            px, py = traj[target.id][t - 1]
+        else:
+            px, py = target.x, target.y
+            
+        if segment_hits_circle(fx, fy, nx, ny, px, py, target.radius):
+            return t
+        fx, fy = nx, ny
+    return -1
+
+def get_guaranteed_intercept(src, target, ships, traj):
+    """Calculates the exact angle required to guarantee a physical hit on a moving target."""
+    sp = fleet_speed(ships)
+    tx, ty = target.x, target.y
+    
+    # 1. Fast iterative homing to find the rough collision turn
+    turns = 1
+    for _ in range(5):
+        d = max(0.0, dist(src.x, src.y, tx, ty) - src.radius - 0.1 - target.radius)
+        turns = max(1, int(math.ceil(d / sp)))
+        if turns - 1 < len(traj[target.id]) and traj[target.id][turns - 1] is not None:
+            tx, ty = traj[target.id][turns - 1]
+        else:
+            break
+            
+    # 2. The Angular Sweep: Fixes the Fractional Turn miss
+    # Sweeps a window of turns around the expected impact
+    for t in range(max(1, turns - 2), turns + 4):
+        if t - 1 < len(traj[target.id]) and traj[target.id][t - 1] is not None:
+            px, py = traj[target.id][t - 1]
+            d = dist(src.x, src.y, px, py)
+            base_angle = math.atan2(py - src.y, px - src.x)
+            
+            # Calculate the angular width of the planet to shoot 7 tracer rounds
+            width = math.asin(min(1.0, target.radius / max(1.0, d)))
+            
+            for offset in[0, 0.3, -0.3, 0.6, -0.6, 0.9, -0.9]:
+                test_angle = base_angle + offset * width
+                hit_turn = flight_hits_target(src, target, test_angle, ships, traj, t + 3)
+                if hit_turn != -1:
+                    return test_angle, hit_turn
+                    
+    return None, None
+
+def aim_and_need(src, target, arrivals, player, remaining_steps, planets, traj):
+    # Pre-check: Don't attack planets we already secured in the timeline!
+    owner, _ = simulate_planet(target, arrivals, test_fleet=None, max_turn=min(150, remaining_steps))
+    if owner == player:
+        return None 
+        
+    low, high = 1, 2000
     best = None
     
     while low <= high:
         mid = (low + high) // 2
-        tx, ty = target.x, target.y
-        for _ in range(5):
-            _, turns = estimate_arrival(src.x, src.y, tx, ty, mid, src.radius, target.radius)
-            pos = predict_pos(target, initial_by_id, ang_vel, comets, comet_ids, turns)
-            if pos is None: break
-            tx, ty = pos[0], pos[1]
-            
-        if pos is None: 
-            high = mid - 1
+        
+        angle, turns = get_guaranteed_intercept(src, target, mid, traj)
+        if angle is None:
+            # Fleet is too slow to hit before it hides behind the sun/moves away. Try faster fleet!
+            low = mid + 1 
             continue
             
-        angle, turns = estimate_arrival(src.x, src.y, tx, ty, mid, src.radius, target.radius)
         owner, _ = simulate_planet(target, arrivals, test_fleet=(turns, mid, player), max_turn=min(150, remaining_steps))
         
         if owner == player:
@@ -272,14 +348,8 @@ def aim_and_need(src, target, arrivals, player, remaining_steps, planets, traj, 
     if best is None: return None
     
     send = max(10, int(best * 1.15))
-    
-    tx, ty = target.x, target.y
-    for _ in range(5):
-        angle, turns = estimate_arrival(src.x, src.y, tx, ty, send, src.radius, target.radius)
-        pos = predict_pos(target, initial_by_id, ang_vel, comets, comet_ids, turns)
-        if pos is None: return None
-        tx, ty = pos[0], pos[1]
-    angle, turns = estimate_arrival(src.x, src.y, tx, ty, send, src.radius, target.radius)
+    angle, turns = get_guaranteed_intercept(src, target, send, traj)
+    if angle is None: return None
     
     if path_blocked_by_planet(src, target, angle, send, planets, traj, turns): return None
     return send, angle, turns
@@ -291,15 +361,15 @@ def agent(obs):
     get = obs.get if isinstance(obs, dict) else lambda k, d=None: getattr(obs, k, d)
     player        = get("player", 0)
     step          = get("step", 0) or 0
-    planets       = [Planet(*p) for p in get("planets", [])]
+    planets       =[Planet(*p) for p in get("planets", [])]
     fleets        = [Fleet(*f) for f in get("fleets", [])]
     ang_vel       = get("angular_velocity", 0.0) or 0.0
-    initial_by_id = {Planet(*p).id: Planet(*p) for p in get("initial_planets", [])}
-    comets        = get("comets", []) or []
-    comet_ids     = set(get("comet_planet_ids", []) or [])
-    my_planets    = [p for p in planets if p.owner == player]
+    initial_by_id = {Planet(*p).id: Planet(*p) for p in get("initial_planets",[])}
+    comets        = get("comets", []) or[]
+    comet_ids     = set(get("comet_planet_ids", []) or[])
+    my_planets    =[p for p in planets if p.owner == player]
     
-    if not my_planets: return []
+    if not my_planets: return[]
 
     remaining = max(1, TOTAL_STEPS - step)
     n_players = len(set([p.owner for p in planets if p.owner != -1]))
@@ -307,24 +377,52 @@ def agent(obs):
     
     traj = precompute_trajectories(planets, initial_by_id, ang_vel, comets, comet_ids, max_turns=250)
     arrivals = build_threat_map(fleets, planets, traj, max_turns=150)
-    moves = []
+    moves =[]
     
+    enemy_planets =[p for p in planets if p.owner != player and p.owner != -1]
+    
+    frontline_status = {}
+    for p in planets:
+        if p.owner == -1:
+            frontline_status[p.id] = False
+            continue
+        enemies =[e for e in planets if e.owner != p.owner and e.owner != -1]
+        if not enemies:
+            frontline_status[p.id] = False
+        else:
+            min_dist = min([dist(p.x, p.y, e.x, e.y) for e in enemies])
+            frontline_status[p.id] = min_dist <= 50.0
 
+    planet_available = {}
+    for p in planets:
+        if p.owner == -1:
+            planet_available[p.id] = 0
+            continue
+        res = safe_reserve(p, arrivals.get(p.id, {}), p.owner, remaining)
+        if frontline_status[p.id]:
+            res = max(res, int(p.ships * 0.15))
+        planet_available[p.id] = max(0, p.ships - res)
+
+    # ====================================================
+    # COMMAND LOOP
+    # ====================================================
     for src in my_planets:
         lifespan = get_comet_lifespan(src.id, comets) if src.id in comet_ids else 500
+        
         res = safe_reserve(src, arrivals.get(src.id, {}), player, remaining)
-        available = src.ships - res
+        available = max(0, src.ships - res)
         
         # --- COMET EVACUATION PROTOCOL ---
         if lifespan <= 5:
             available = src.ships
             if available > 0:
-                friends = [p for p in my_planets if p.id != src.id and p.id not in comet_ids]
+                friends =[p for p in my_planets if p.id != src.id and p.id not in comet_ids]
                 if friends:
                     best_f = min(friends, key=lambda f: dist(src.x, src.y, f.x, f.y))
-                    angle = math.atan2(best_f.y - src.y, best_f.x - src.x)
+                    angle, turns = get_guaranteed_intercept(src, best_f, available, traj)
+                    if angle is None: angle = math.atan2(best_f.y - src.y, best_f.x - src.x)
                 else:
-                    corners = [(0,0), (0,100), (100,0), (100,100)]
+                    corners =[(0,0), (0,100), (100,0), (100,100)]
                     best_c = max(corners, key=lambda c: dist(src.x, src.y, c[0], c[1]))
                     angle = math.atan2(best_c[1] - src.y, best_c[0] - src.x)
                 moves.append([src.id, float(angle), int(available)])
@@ -332,35 +430,111 @@ def agent(obs):
         
         if available < 10: continue
             
-        candidates = []
+        # --- SUPPLY CHAIN BATCHING ---
+        if not frontline_status[src.id]:
+            frontline_friends =[p for p in my_planets if p.id != src.id and p.id not in comet_ids and frontline_status.get(p.id, False)]
+            if frontline_friends:
+                if available >= max(20, int(src.ships * 0.5)):
+                    best_f = min(frontline_friends, key=lambda f: dist(src.x, src.y, f.x, f.y))
+                    send = available
+                    angle, turns = get_guaranteed_intercept(src, best_f, send, traj)
+                    if angle is not None:
+                        if not path_blocked_by_planet(src, best_f, angle, send, planets, traj, turns):
+                            moves.append([src.id, float(angle), int(send)])
+                            arrivals[best_f.id][turns][player] += send
+                            continue
+        
+        # --- AGGRESSIVE TARGETING ---
+        candidates =[]
         for tgt in planets:
             if src.id == tgt.id: continue
-            score = tgt.production / max(1.0, dist(src.x, src.y, tgt.x, tgt.y))
-            if tgt.owner != player and tgt.owner != -1: score *= 1.5
-            candidates.append((score, tgt))
+            dist_val = max(1.0, dist(src.x, src.y, tgt.x, tgt.y))
+            # Optimal balance of local expansion
+            base_score = tgt.production / (dist_val ** 1.1)
+            # The Throat-Slit Multiplier: Massively reward stealing enemy bases
+            if tgt.owner != player and tgt.owner != -1: 
+                base_score *= 2.0
+            candidates.append((base_score, tgt))
             
         candidates.sort(key=lambda x: -x[0])
         
-        # CPU OPTIMIZATION: Only evaluate the top 10 most valuable targets
-        for _, tgt in candidates[:10]:
-            if available < 10: break
+        while available >= 10:
+            best_move = None
+            best_roi = -1.0
+            best_tgt_obj = None
             
-            result = aim_and_need(src, tgt, arrivals.get(tgt.id, {}), player, remaining, planets, traj, initial_by_id, ang_vel, comets, comet_ids)
-            if result is None: continue
-            
-            send, angle, turns = result
-            if turns > remaining: continue
-            if send > available: continue
-            
-            tgt_life = get_comet_lifespan(tgt.id, comets) if tgt.id in comet_ids else 500
-            
-            V_A = evaluate_timeline(tgt, arrivals.get(tgt.id, {}), player, remaining, is_ffa, tgt_life)
-            V_B = evaluate_timeline(tgt, arrivals.get(tgt.id, {}), player, remaining, is_ffa, tgt_life, test_fleet=(turns, send, player))
-            profit = (V_B - send) - V_A
-            
-            if profit > 0:
+            for base_score, tgt in candidates[:10]:
+                
+                result = aim_and_need(src, tgt, arrivals.get(tgt.id, {}), player, remaining, planets, traj)
+                if result is None: continue
+                
+                send, angle, turns = result
+                if turns > remaining: continue
+                if send > available: continue
+                
+                # SPACETIME RADAR (Analyze future traps)
+                if turns <= len(traj[tgt.id]) and traj[tgt.id][turns - 1] is not None:
+                    tx, ty = traj[tgt.id][turns - 1]
+                else:
+                    tx, ty = tgt.x, tgt.y
+                    
+                enemy_armies = defaultdict(int)
+                for p in enemy_planets:
+                    if p.id == tgt.id: continue
+                    for t in range(turns, -1, -1):
+                        px, py = p.x, p.y
+                        if t > 0 and t <= len(traj[p.id]) and traj[p.id][t - 1] is not None:
+                            px, py = traj[p.id][t - 1]
+                            
+                        proj_s = planet_available[p.id] + p.production * t
+                        if proj_s < 10: continue
+                        
+                        req_turns = max(1, int(math.ceil(max(0.0, dist(px, py, tx, ty) - p.radius - 0.1 - tgt.radius) / fleet_speed(proj_s))))
+                        
+                        if t + req_turns <= turns:
+                            if not future_path_blocked(px, py, tx, ty, t, req_turns, proj_s, p.radius, tgt.radius, planets, traj, {p.id, tgt.id}):
+                                enemy_armies[p.owner] += int(proj_s * 0.75)
+                                break
+                                
+                max_e = max(enemy_armies.values()) if enemy_armies else 0
+                
+                # OVERPOWER THE TRAP
+                safe_send = send + max_e
+                
+                if safe_send > available: 
+                    continue 
+                    
+                if safe_send > send:
+                    # Re-Aim for the faster fleet
+                    angle_new, turns_new = get_guaranteed_intercept(src, tgt, safe_send, traj)
+                    if angle_new is None: continue
+                    if path_blocked_by_planet(src, tgt, angle_new, safe_send, planets, traj, turns_new): 
+                        continue
+                        
+                    angle = angle_new
+                    turns = turns_new
+                    send = safe_send
+
+                tgt_life = get_comet_lifespan(tgt.id, comets) if tgt.id in comet_ids else 500
+                V_A = evaluate_timeline(tgt, arrivals.get(tgt.id, {}), player, remaining, is_ffa, tgt_life)
+                V_B = evaluate_timeline(tgt, arrivals.get(tgt.id, {}), player, remaining, is_ffa, tgt_life, test_fleet=(turns, send, player))
+                
+                profit = (V_B - send) - V_A
+                if profit > 0:
+                    roi = ((profit * profit) / max(1.0, float(send))) * base_score
+                        
+                    if roi > best_roi:
+                        best_roi = roi
+                        best_move = (tgt.id, angle, send, turns)
+                        best_tgt_obj = (base_score, tgt)
+                        
+            if best_move:
+                tgt_id, angle, send, turns = best_move
                 moves.append([src.id, float(angle), int(send)])
-                arrivals[tgt.id][turns][player] += send
+                arrivals[tgt_id][turns][player] += send
                 available -= send
+                candidates.remove(best_tgt_obj)
+            else:
+                break
                 
     return moves
